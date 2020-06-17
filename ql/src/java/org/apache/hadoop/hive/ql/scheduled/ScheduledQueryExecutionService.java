@@ -190,6 +190,7 @@ public class ScheduledQueryExecutionService implements Closeable {
 
     public void run() {
       try (NamedThread namedThread = new NamedThread(getThreadName())) {
+        LOG.error("AASHA {} ", pollResponse.getScheduleKey().getScheduleName() );
         processQuery(pollResponse);
       } finally {
         executorStopped(this);

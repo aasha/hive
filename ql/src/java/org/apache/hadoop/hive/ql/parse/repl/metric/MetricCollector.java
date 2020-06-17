@@ -88,7 +88,7 @@ public final class MetricCollector {
   }
 
   //For testing
-  synchronized void deinit() {
+  public synchronized void deinit() {
     if (isInited) {
       isInited = false;
       metricMap.clear();

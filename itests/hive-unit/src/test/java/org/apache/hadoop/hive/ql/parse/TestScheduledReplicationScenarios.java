@@ -53,7 +53,7 @@ import java.util.ArrayList;
  * TestScheduledReplicationScenarios - test scheduled replication .
  */
 public class TestScheduledReplicationScenarios extends BaseReplicationScenariosAcidTables {
-  private static final long DEFAULT_PROBE_TIMEOUT = 5 * 60 * 1000L; // 2 minutes
+  private static final long DEFAULT_PROBE_TIMEOUT = 5 * 60 * 1000L; // 5 minutes
   private static ScheduledQueryExecutionService schqS;
 
   @BeforeClass
@@ -216,16 +216,6 @@ public class TestScheduledReplicationScenarios extends BaseReplicationScenariosA
               .verifyResult("t2")
               .run("select id from t2 order by id")
               .verifyResults(new String[]{"1", "2"});
-      //Generate expected metrics
-      List<ReplicationMetric> expectedReplicationMetrics = new ArrayList<>();
-      expectedReplicationMetrics.add(generateExpectedMetric("s1_t2", 0, primaryDbName,
-          Metadata.ReplicationType.BOOTSTRAP, ackPath.getParent().toString(), lastReplId, Status.SUCCESS,
-          generateDumpStages(true)));
-      expectedReplicationMetrics.add(generateExpectedMetric("s2_t2",
-          dumpMetaData.getDumpExecutionId(), replicatedDbName,
-          Metadata.ReplicationType.BOOTSTRAP, ackPath.getParent().toString(), lastReplId, Status.SUCCESS,
-          generateLoadStages(true)));
-      checkMetrics(expectedReplicationMetrics, replicationMetrics);
       // First incremental, after bootstrap
       primary.run("use " + primaryDbName)
               .run("insert into t2 values(3)")
@@ -242,6 +232,92 @@ public class TestScheduledReplicationScenarios extends BaseReplicationScenariosA
     } finally {
       primary.run("drop scheduled query s1_t2");
       replica.run("drop scheduled query s2_t2");
+    }
+  }
+
+  @Test
+  public void testReplicationMetricsBootstrapIncr() throws Throwable {
+    // Bootstrap
+    String withClause = " WITH('" + HiveConf.ConfVars.REPL_EXTERNAL_TABLE_BASE_DIR.varname
+      + "'='/replica_external_base', '" + HiveConf.ConfVars.REPL_INCLUDE_AUTHORIZATION_METADATA
+      + "' = 'true' ,'" + HiveConf.ConfVars.REPL_INCLUDE_ATLAS_METADATA + "' = 'true' , '"
+      + HiveConf.ConfVars.HIVE_IN_TEST + "' = 'true'" + ",'"+ HiveConf.ConfVars.REPL_ATLAS_ENDPOINT
+      + "' = 'http://localhost:21000/atlas'" +  ",'"+ HiveConf.ConfVars.REPL_ATLAS_REPLICATED_TO_DB + "' = 'tgt'"
+      +  ",'"+ HiveConf.ConfVars.REPL_SOURCE_CLUSTER_NAME + "' = 'cluster0'"
+      +  ",'"+ HiveConf.ConfVars.REPL_TARGET_CLUSTER_NAME + "' = 'cluster1')";
+    primary.run("use " + primaryDbName)
+      .run("create external table t2 (id int)")
+      .run("insert into t2 values(1)")
+      .run("insert into t2 values(2)");
+    try {
+      int next = -1;
+      ReplDumpWork.injectNextDumpDirForTest(String.valueOf(next), true);
+      primary.run("create scheduled query s1_t3 every 15 minutes as repl dump " + primaryDbName + withClause);
+      replica.run("create scheduled query s2_t3 every 15 minutes as repl load " + primaryDbName + " INTO "
+        + replicatedDbName + withClause);
+      Path dumpRoot = new Path(primary.hiveConf.getVar(HiveConf.ConfVars.REPLDIR),
+        Base64.getEncoder().encodeToString(primaryDbName.toLowerCase().getBytes(StandardCharsets.UTF_8.name())));
+      FileSystem fs = FileSystem.get(dumpRoot.toUri(), primary.hiveConf);
+      next = Integer.parseInt(ReplDumpWork.getTestInjectDumpDir()) + 1;
+      Path baseDumpPath = new Path(new Path(dumpRoot, String.valueOf(next)), ReplUtils.REPL_HIVE_BASE_DIR);
+      Path loadAckPath = new Path(baseDumpPath, ReplAck.LOAD_ACKNOWLEDGEMENT.toString());
+      Path dumpAckPath = new Path(baseDumpPath, ReplAck.DUMP_ACKNOWLEDGEMENT.toString());
+      primary.run("alter scheduled query s1_t3 execute");
+      waitForAck(fs, dumpAckPath, DEFAULT_PROBE_TIMEOUT);
+      replica.run("alter scheduled query s2_t3 execute");
+      waitForAck(fs, loadAckPath, DEFAULT_PROBE_TIMEOUT);
+      long lastReplId = Long.parseLong(primary.status(replicatedDbName).getOutput().get(0));
+      DumpMetaData dumpMetaData = new DumpMetaData(loadAckPath.getParent(), primary.hiveConf);
+      List<ReplicationMetric> replicationMetrics = MetricCollector.getInstance().getMetrics();
+      Assert.assertEquals(2, replicationMetrics.size());
+      replica.run("use " + replicatedDbName)
+        .run("show tables like 't2'")
+        .verifyResult("t2")
+        .run("select id from t2 order by id")
+        .verifyResults(new String[]{"1", "2"});
+      //Generate expected metrics
+      List<ReplicationMetric> expectedReplicationMetrics = new ArrayList<>();
+      expectedReplicationMetrics.add(generateExpectedMetric("s1_t3", 0, primaryDbName,
+        Metadata.ReplicationType.BOOTSTRAP, loadAckPath.getParent().toString(), lastReplId, Status.SUCCESS,
+        generateDumpStages(true)));
+      expectedReplicationMetrics.add(generateExpectedMetric("s2_t3",
+        dumpMetaData.getDumpExecutionId(), replicatedDbName,
+        Metadata.ReplicationType.BOOTSTRAP, loadAckPath.getParent().toString(), lastReplId, Status.SUCCESS,
+        generateLoadStages(true)));
+      checkMetrics(expectedReplicationMetrics, replicationMetrics);
+      // First incremental, after bootstrap
+      primary.run("use " + primaryDbName)
+        .run("insert into t2 values(3)")
+        .run("insert into t2 values(4)");
+      next = Integer.parseInt(ReplDumpWork.getTestInjectDumpDir()) + 1;
+      baseDumpPath = new Path(new Path(dumpRoot, String.valueOf(next)), ReplUtils.REPL_HIVE_BASE_DIR);
+      loadAckPath = new Path(baseDumpPath, ReplAck.LOAD_ACKNOWLEDGEMENT.toString());
+      dumpAckPath = new Path(baseDumpPath, ReplAck.DUMP_ACKNOWLEDGEMENT.toString());
+      primary.run("alter scheduled query s1_t3 execute");
+      waitForAck(fs, dumpAckPath, DEFAULT_PROBE_TIMEOUT);
+      replica.run("alter scheduled query s2_t3 execute");
+      waitForAck(fs, loadAckPath, DEFAULT_PROBE_TIMEOUT);
+      replicationMetrics = MetricCollector.getInstance().getMetrics();
+      //Generate expected metrics
+      dumpMetaData = new DumpMetaData(loadAckPath.getParent(), primary.hiveConf);
+      expectedReplicationMetrics = new ArrayList<>();
+      lastReplId = Long.parseLong(primary.status(replicatedDbName).getOutput().get(0));
+      expectedReplicationMetrics.add(generateExpectedMetric("s1_t3", 0, primaryDbName,
+        Metadata.ReplicationType.INCREMENTAL, loadAckPath.getParent().toString(), lastReplId, Status.SUCCESS,
+        generateDumpStages(false)));
+      expectedReplicationMetrics.add(generateExpectedMetric("s2_t3",
+        dumpMetaData.getDumpExecutionId(), replicatedDbName,
+        Metadata.ReplicationType.INCREMENTAL, loadAckPath.getParent().toString(), lastReplId, Status.SUCCESS,
+        generateLoadStages(false)));
+      checkMetrics(expectedReplicationMetrics, replicationMetrics);
+      replica.run("use " + replicatedDbName)
+        .run("show tables like 't2'")
+        .verifyResult("t2")
+        .run("select id from t2 order by id")
+        .verifyResults(new String[]{"1", "2", "3", "4"});
+    } finally {
+      primary.run("drop scheduled query s1_t3");
+      replica.run("drop scheduled query s2_t3");
     }
   }
 
@@ -273,7 +349,8 @@ public class TestScheduledReplicationScenarios extends BaseReplicationScenariosA
                 Assert.assertEquals(expeStage.getMetrics().size(), actualStage.getMetrics().size());
                 for (Metric actMetric : actualStage.getMetrics()) {
                   for (Metric expMetric : expeStage.getMetrics()) {
-                    if (actMetric.getName().equalsIgnoreCase(expMetric.getName())) {
+                    if (!ReplUtils.MetricName.EVENTS.name().equals(actMetric.getName())
+                      && actMetric.getName().equalsIgnoreCase(expMetric.getName())) {
                       Assert.assertEquals(expMetric.getTotalCount(), actMetric.getTotalCount());
                       Assert.assertEquals(expMetric.getCurrentCount(), actMetric.getCurrentCount());
                     }
@@ -316,8 +393,8 @@ public class TestScheduledReplicationScenarios extends BaseReplicationScenariosA
       hiveMetric = new Metric(ReplUtils.MetricName.FUNCTIONS.name(), 0);
       replDump.addMetric(hiveMetric);
     } else {
-      Metric hiveMetric = new Metric(ReplUtils.MetricName.EVENTS.name(), 1);
-      hiveMetric.setCurrentCount(1);
+      Metric hiveMetric = new Metric(ReplUtils.MetricName.EVENTS.name(), 0);
+      hiveMetric.setCurrentCount(0);
       replDump.addMetric(hiveMetric);
     }
     stages.add(replDump);
@@ -345,8 +422,8 @@ public class TestScheduledReplicationScenarios extends BaseReplicationScenariosA
       hiveMetric = new Metric(ReplUtils.MetricName.FUNCTIONS.name(), 0);
       replDump.addMetric(hiveMetric);
     } else {
-      Metric hiveMetric = new Metric(ReplUtils.MetricName.EVENTS.name(), 1);
-      hiveMetric.setCurrentCount(1);
+      Metric hiveMetric = new Metric(ReplUtils.MetricName.EVENTS.name(), 0);
+      hiveMetric.setCurrentCount(0);
       replDump.addMetric(hiveMetric);
     }
     stages.add(replDump);

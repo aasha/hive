@@ -237,7 +237,7 @@ public class RangerRestClientImpl implements RangerRestClient {
           LOG.debug("Ranger policy import finished successfully");
 
         } else if (clientResp.getStatus() == HttpServletResponse.SC_UNAUTHORIZED) {
-          throw new Exception("Authentication Failure while communicating to Ranger admin");
+          throw new Exception("Authentication Failure while communicating to Ranger admintest1111111");
         } else {
           throw new Exception("Ranger policy import failed, Please refer target Ranger admin logs.");
         }
